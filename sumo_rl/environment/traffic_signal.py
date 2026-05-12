@@ -2,8 +2,8 @@
 
 import os
 import sys
-from typing import Callable, List, Union
-
+from typing import Callable, List, Union, Any
+from collections import deque
 
 if "SUMO_HOME" in os.environ:
     tools = os.path.join(os.environ["SUMO_HOME"], "tools")
@@ -57,6 +57,7 @@ class TrafficSignal:
         begin_time: int,
         reward_fn: Union[str, Callable, List],
         reward_weights: List[float],
+        f_mode: Callable[[Any, Any], Any],
         sumo,
     ):
         """Initializes a TrafficSignal object.
@@ -117,6 +118,23 @@ class TrafficSignal:
         self.observation_space = self.observation_fn.observation_space()
         self.action_space = spaces.Discrete(self.num_green_phases)
 
+        # set affected lanes and type for sensor emulation
+        self.affected_lanes = self.set_affected_lanes()
+        self.failure_fn = f_mode
+
+        # for keeping track of past states
+        self.past_queues = deque(maxlen=5)
+
+
+    def set_affected_lanes(self, seed=123):
+        np.random.seed(seed)
+        length = len(self.lanes)
+        number_impacted = abs(round(np.random.normal(loc=0.5 * length, scale=0.025 * length)))
+        pos = np.zeros(length, dtype=int)
+        indices = np.random.choice(length, number_impacted, replace=False)
+        pos[indices] = 1
+        return pos
+
     def _get_reward_fn_from_string(self, reward_fn):
         if type(reward_fn) is str:
             if reward_fn in TrafficSignal.reward_fns.keys():
@@ -176,6 +194,10 @@ class TrafficSignal:
             self.sumo.trafficlight.setRedYellowGreenState(self.id, self.all_phases[self.green_phase].state)
             self.is_yellow = False
 
+        # # log traffic lights
+        # phase_type = "YELLOW" if getattr(self, 'is_yellow', False) else "GREEN"
+        # log_phases(f"{self.env.out_csv_name}/phases.csv", self.env.sim_step, self.id, self.green_phase, phase_type)
+
     def set_next_phase(self, new_phase: int):
         """Sets what will be the next green phase and sets yellow phase if the next phase is different than the current.
 
@@ -219,6 +241,9 @@ class TrafficSignal:
 
     def _pressure_reward(self):
         return self.get_pressure()
+
+    def _normalised_pressure_reward(self):
+        return self.get_norm_pressure()
 
     def _average_speed_reward(self):
         return self.get_average_speed()
@@ -285,6 +310,22 @@ class TrafficSignal:
             self.sumo.lane.getLastStepVehicleNumber(lane) for lane in self.lanes
         )
 
+    def get_norm_pressure(self):
+        press_in = 0
+        press_in_max = 0
+
+        for lane in self.lanes:
+            n_veh = self.sumo.lane.getLastStepVehicleNumber(lane)
+            q_max = self.lanes_length[lane] / (self.MIN_GAP + self.sumo.lane.getLastStepLength(lane))
+
+            press_in += n_veh
+            press_in_max += q_max
+
+        press_out = sum(self.sumo.lane.getLastStepVehicleNumber(lane) for lane in self.out_lanes)
+        press = press_out - press_in
+
+        return 0 if press_in_max == 0 else press / press_in_max
+
     def get_out_lanes_density(self) -> List[float]:
         """Returns the density of the vehicles in the outgoing lanes of the intersection."""
         lanes_density = [
@@ -311,11 +352,22 @@ class TrafficSignal:
 
         Obs: The queue is computed as the number of vehicles halting divided by the number of vehicles that could fit in the lane.
         """
-        lanes_queue = [
-            self.sumo.lane.getLastStepHaltingNumber(lane)
-            / (self.lanes_length[lane] / (self.MIN_GAP + self.sumo.lane.getLastStepLength(lane)))
-            for lane in self.lanes
-        ]
+        # lanes_queue = [
+        #     self.sumo.lane.getLastStepHaltingNumber(lane)
+        #     / (self.lanes_length[lane] / (self.MIN_GAP + self.sumo.lane.getLastStepLength(lane)))
+        #     for lane in self.lanes
+        # ]
+
+        lanes_queue = []
+        for lane_ind, lane in enumerate(self.lanes):
+            n_halting = self.sumo.lane.getLastStepHaltingNumber(lane)
+
+            # apply selected failure mode
+            n_halting = self.failure_fn(n_halting) if self.affected_lanes[lane_ind] == 1 else n_halting
+
+            n_norm = n_halting / (self.lanes_length[lane] / (self.MIN_GAP + self.sumo.lane.getLastStepLength(lane)))
+            lanes_queue.append(n_norm)
+
         return [min(1, queue) for queue in lanes_queue]
 
     def get_total_queued(self) -> int:
@@ -350,4 +402,5 @@ class TrafficSignal:
         "queue": _queue_reward,
         "pressure": _pressure_reward,
         "co2": _co2_reward,
+        "pressure_normalised": _normalised_pressure_reward
     }

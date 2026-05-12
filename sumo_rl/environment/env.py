@@ -1,9 +1,11 @@
 """SUMO Environment for Traffic Signal Control."""
 
 import os
+import random
 import sys
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple, Union
+
 
 
 if "SUMO_HOME" in os.environ:
@@ -32,6 +34,8 @@ from pettingzoo.utils.conversions import parallel_wrapper_fn
 
 from .observations import DefaultObservationFunction, ObservationFunction
 from .traffic_signal import TrafficSignal
+
+from setup.sensor_failures import *
 
 
 LIBSUMO = "LIBSUMO_AS_TRACI" in os.environ
@@ -78,7 +82,6 @@ class SumoEnvironment(gym.Env):
         add_system_info (bool): If true, it computes system metrics (total queue, total waiting time, average speed) in the info dictionary.
         add_per_agent_info (bool): If true, it computes per-agent (per-traffic signal) metrics (average accumulated waiting time, average queue) in the info dictionary.
         sumo_seed (int/string): Random seed for sumo. If 'random' it uses a randomly chosen seed.
-        ts_ids (Optional[List[str]]): List of traffic light IDs to be controlled by SUMO-RL. If None, all traffic lights in the simulation are controlled.
         fixed_ts (bool): If true, it will follow the phase configuration in the route_file and ignore the actions given in the :meth:`step` method.
         sumo_warnings (bool): If true, it will print SUMO warnings.
         additional_sumo_cmd (str): Additional SUMO command line arguments.
@@ -99,27 +102,28 @@ class SumoEnvironment(gym.Env):
         use_gui: bool = False,
         virtual_display: Tuple[int, int] = (3200, 1800),
         begin_time: int = 0,
-        num_seconds: int = 20000,
+        num_seconds: int = 3600,
         max_depart_delay: int = -1,
-        waiting_time_memory: int = 1000,
-        time_to_teleport: int = -1,
-        delta_time: int = 5,
-        yellow_time: int = 2,
+        waiting_time_memory: int = 100,
+        time_to_teleport: int = 300,
+        delta_time: int = 4,
+        yellow_time: int = 3,
         min_green: int = 5,
         max_green: int = 50,
         enforce_max_green: bool = False,
         single_agent: bool = False,
         reward_fn: Union[str, Callable, dict, List] = "diff-waiting-time",
         reward_weights: Optional[List[float]] = None,
-        observation_class: type[ObservationFunction] = DefaultObservationFunction,
+        observation_class: ObservationFunction = DefaultObservationFunction,
         add_system_info: bool = True,
         add_per_agent_info: bool = True,
-        sumo_seed: Union[str, int] = "random",
-        ts_ids: Optional[List[str]] = None,
+        sumo_seed: Union[str, int] = 23423, #"random",
         fixed_ts: bool = False,
         sumo_warnings: bool = True,
         additional_sumo_cmd: Optional[str] = None,
         render_mode: Optional[str] = None,
+        traffic_lights: Optional[str] = None,
+        route_files: Optional[List[str]] = None,
     ) -> None:
         """Initialize the environment."""
         assert render_mode is None or render_mode in self.metadata["render_modes"], "Invalid render mode."
@@ -152,8 +156,6 @@ class SumoEnvironment(gym.Env):
         self.reward_fn = reward_fn
         self.reward_weights = reward_weights
         self.sumo_seed = sumo_seed
-        if isinstance(self.sumo_seed, int):
-            self.sumo_seed &= 0x7FFFFFFF  # Ensure 32 bit non-negative seed
         self.fixed_ts = fixed_ts
         self.sumo_warnings = sumo_warnings
         self.additional_sumo_cmd = additional_sumo_cmd
@@ -162,19 +164,20 @@ class SumoEnvironment(gym.Env):
         self.label = str(SumoEnvironment.CONNECTION_LABEL)
         SumoEnvironment.CONNECTION_LABEL += 1
         self.sumo = None
+        self.route_files = route_files
+        self.failure_modes = [no_fail, blackout, stuck_on, short_circuit_intermittent]
 
         if LIBSUMO:
-            traci.start([sumolib.checkBinary("sumo"), "-n", self._net])  # Start only to retrieve traffic light information
+            traci.start([sumolib.checkBinary("sumo"), "-n", self._net,])  # Start only to retrieve traffic light information
             conn = traci
         else:
             traci.start([sumolib.checkBinary("sumo"), "-n", self._net], label="init_connection" + self.label)
             conn = traci.getConnection("init_connection" + self.label)
 
-        if ts_ids is None:
-            self.ts_ids = list(conn.trafficlight.getIDList())
-        else:
-            self.ts_ids = ts_ids
+        self.ts_ids = traffic_lights if traffic_lights else list(conn.trafficlight.getIDList())
         self.observation_class = observation_class
+
+        self.out_csv_name = out_csv_name
 
         self._build_traffic_signals(conn)
 
@@ -184,13 +187,16 @@ class SumoEnvironment(gym.Env):
         self.reward_range = (-float("inf"), float("inf"))
         self.episode = 0
         self.metrics = []
-        self.out_csv_name = out_csv_name
         self.observations = {ts: None for ts in self.ts_ids}
         self.rewards = {ts: None for ts in self.ts_ids}
 
     def _build_traffic_signals(self, conn):
         if not isinstance(self.reward_fn, dict):
             self.reward_fn = {ts: self.reward_fn for ts in self.ts_ids}
+
+        # randomly failure mode
+        f_mode = random.choice(self.failure_modes)
+        print(f"Chosen failure mode: {f_mode.__name__}")
 
         self.traffic_signals = {
             ts: TrafficSignal(
@@ -204,6 +210,7 @@ class SumoEnvironment(gym.Env):
                 self.begin_time,
                 self.reward_fn[ts],
                 self.reward_weights,
+                f_mode,
                 conn,
             )
             for ts in self.ts_ids
@@ -258,6 +265,13 @@ class SumoEnvironment(gym.Env):
 
     def reset(self, seed: Optional[int] = None, **kwargs):
         """Reset the environment."""
+
+        # reset route_file to random if multiple available
+        if len(self.route_files) > 1:
+            route_file = random.choice(self.route_files)
+            self._route = route_file
+
+        print(self._route)
         super().reset(seed=seed, **kwargs)
 
         if self.episode != 0:
@@ -267,7 +281,7 @@ class SumoEnvironment(gym.Env):
         self.metrics = []
 
         if seed is not None:
-            self.sumo_seed = seed & 0x7FFFFFFF  # Ensure 32 bit non-negative seed
+            self.sumo_seed = seed
         self._start_simulation()
 
         self._build_traffic_signals(self.sumo)
@@ -333,10 +347,13 @@ class SumoEnvironment(gym.Env):
         if self.single_agent:
             if self.traffic_signals[self.ts_ids[0]].time_to_act:
                 self.traffic_signals[self.ts_ids[0]].set_next_phase(actions)
+                # self.traffic_signals[self.ts_ids[0]].set_next_phase_incl_allowed_skips(actions)
+
         else:
             for ts, action in actions.items():
                 if self.traffic_signals[ts].time_to_act:
                     self.traffic_signals[ts].set_next_phase(action)
+                    # self.traffic_signals[self.ts_ids[0]].set_next_phase_incl_allowed_skips(action)
 
     def _compute_dones(self):
         dones = {ts_id: False for ts_id in self.ts_ids}
@@ -421,6 +438,7 @@ class SumoEnvironment(gym.Env):
         self.num_arrived_vehicles += self.sumo.simulation.getArrivedNumber()
         self.num_departed_vehicles += self.sumo.simulation.getDepartedNumber()
         self.num_teleported_vehicles += self.sumo.simulation.getEndingTeleportNumber()
+
 
     def _get_system_info(self):
         vehicles = self.sumo.vehicle.getIDList()
@@ -508,9 +526,14 @@ class SumoEnvironment(gym.Env):
         """Encode the state of the traffic signal into a hashable object."""
         phase = int(np.where(state[: self.traffic_signals[ts_id].num_green_phases] == 1)[0])
         min_green = state[self.traffic_signals[ts_id].num_green_phases]
-        density_queue = [self._discretize_density(d) for d in state[self.traffic_signals[ts_id].num_green_phases + 1 :]]
-        # tuples are hashable and can be used as key in python dictionary
-        return tuple([phase, min_green] + density_queue)
+        #### original
+        # density_queue = [self._discretize_density(d) for d in state[self.traffic_signals[ts_id].num_green_phases + 1 :]]
+        # return tuple([phase, min_green] + density_queue) # tuples are hashable and can be used as key in python dictionary
+        ####
+
+        #### no density, multiple states
+        queue_values = state[self.traffic_signals[ts_id].num_green_phases + 1:]
+        return tuple([phase, min_green] + queue_values.tolist())
 
     def _discretize_density(self, density):
         return min(int(density * 10), 9)

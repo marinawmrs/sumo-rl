@@ -57,7 +57,7 @@ class TrafficSignal:
         begin_time: int,
         reward_fn: Union[str, Callable, List],
         reward_weights: List[float],
-        f_mode: Callable[[Any, Any], Any],
+        # f_mode: Callable[[Any, Any], Any],
         sumo,
     ):
         """Initializes a TrafficSignal object.
@@ -120,7 +120,7 @@ class TrafficSignal:
 
         # set affected lanes and type for sensor emulation
         self.affected_lanes = self.set_affected_lanes()
-        self.failure_fn = f_mode
+        # self.failure_fn = f_mode
 
         # for keeping track of past states
         self.past_queues = deque(maxlen=5)
@@ -362,8 +362,8 @@ class TrafficSignal:
         for lane_ind, lane in enumerate(self.lanes):
             n_halting = self.sumo.lane.getLastStepHaltingNumber(lane)
 
-            # apply selected failure mode
-            n_halting = self.failure_fn(n_halting) if self.affected_lanes[lane_ind] == 1 else n_halting
+            # # apply selected failure mode
+            # n_halting = self.failure_fn(n_halting) if self.affected_lanes[lane_ind] == 1 else n_halting
 
             n_norm = n_halting / (self.lanes_length[lane] / (self.MIN_GAP + self.sumo.lane.getLastStepLength(lane)))
             lanes_queue.append(n_norm)

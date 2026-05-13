@@ -35,7 +35,7 @@ from pettingzoo.utils.conversions import parallel_wrapper_fn
 from .observations import DefaultObservationFunction, ObservationFunction
 from .traffic_signal import TrafficSignal
 
-from setup.sensor_failures import *
+# from setup.sensor_failures import *
 
 
 LIBSUMO = "LIBSUMO_AS_TRACI" in os.environ
@@ -165,7 +165,7 @@ class SumoEnvironment(gym.Env):
         SumoEnvironment.CONNECTION_LABEL += 1
         self.sumo = None
         self.route_files = route_files
-        self.failure_modes = [no_fail, blackout, stuck_on, short_circuit_intermittent]
+        # self.failure_modes = [no_fail, blackout, stuck_on, short_circuit_intermittent]
 
         if LIBSUMO:
             traci.start([sumolib.checkBinary("sumo"), "-n", self._net,])  # Start only to retrieve traffic light information
@@ -194,9 +194,9 @@ class SumoEnvironment(gym.Env):
         if not isinstance(self.reward_fn, dict):
             self.reward_fn = {ts: self.reward_fn for ts in self.ts_ids}
 
-        # randomly failure mode
-        f_mode = random.choice(self.failure_modes)
-        print(f"Chosen failure mode: {f_mode.__name__}")
+        # # randomly failure mode
+        # f_mode = random.choice(self.failure_modes)
+        # print(f"Chosen failure mode: {f_mode.__name__}")
 
         self.traffic_signals = {
             ts: TrafficSignal(
@@ -210,7 +210,7 @@ class SumoEnvironment(gym.Env):
                 self.begin_time,
                 self.reward_fn[ts],
                 self.reward_weights,
-                f_mode,
+                # f_mode,
                 conn,
             )
             for ts in self.ts_ids
